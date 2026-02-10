@@ -30,8 +30,11 @@ WORKDIR /app/bridge
 RUN npm install && npm run build
 WORKDIR /app
 
-# Create config directory
-RUN mkdir -p /root/.nanobot
+# Create config and workspace directories
+RUN mkdir -p /root/.nanobot/workspace
+
+# Set working directory to workspace so relative paths resolve correctly
+WORKDIR /root/.nanobot/workspace
 
 # Gateway default port
 EXPOSE 18790
