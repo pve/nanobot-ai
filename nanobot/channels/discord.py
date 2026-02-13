@@ -78,34 +78,61 @@ class DiscordChannel(BaseChannel):
             logger.warning("Discord HTTP client not initialized")
             return
 
-        url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
-        payload: dict[str, Any] = {"content": msg.content}
-
-        if msg.reply_to:
-            payload["message_reference"] = {"message_id": msg.reply_to}
-            payload["allowed_mentions"] = {"replied_user": False}
-
+        channel_id = msg.chat_id
         headers = {"Authorization": f"Bot {self.config.token}"}
 
-        try:
-            for attempt in range(3):
-                try:
-                    response = await self._http.post(url, headers=headers, json=payload)
-                    if response.status_code == 429:
-                        data = response.json()
-                        retry_after = float(data.get("retry_after", 1.0))
-                        logger.warning(f"Discord rate limited, retrying in {retry_after}s")
-                        await asyncio.sleep(retry_after)
-                        continue
-                    response.raise_for_status()
-                    return
-                except Exception as e:
-                    if attempt == 2:
-                        logger.error(f"Error sending Discord message: {e}")
+        # Try sending to channel; if 404, it might be a user ID — create DM channel
+        for attempt in range(3):
+            try:
+                url = f"{DISCORD_API_BASE}/channels/{channel_id}/messages"
+                payload: dict[str, Any] = {"content": msg.content}
+
+                if msg.reply_to:
+                    payload["message_reference"] = {"message_id": msg.reply_to}
+                    payload["allowed_mentions"] = {"replied_user": False}
+
+                response = await self._http.post(url, headers=headers, json=payload)
+
+                if response.status_code == 404 and attempt == 0:
+                    # Channel not found — maybe chat_id is a user ID, try creating DM
+                    dm_channel_id = await self._get_or_create_dm_channel(msg.chat_id, headers)
+                    if dm_channel_id:
+                        channel_id = dm_channel_id
+                        continue  # Retry with DM channel
                     else:
-                        await asyncio.sleep(1)
-        finally:
-            await self._stop_typing(msg.chat_id)
+                        logger.error(f"Discord: could not create DM channel for {msg.chat_id}")
+                        return
+
+                if response.status_code == 429:
+                    data = response.json()
+                    retry_after = float(data.get("retry_after", 1.0))
+                    logger.warning(f"Discord rate limited, retrying in {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    continue
+
+                response.raise_for_status()
+                return
+            except Exception as e:
+                if attempt == 2:
+                    logger.error(f"Error sending Discord message: {e}")
+                else:
+                    await asyncio.sleep(1)
+
+        await self._stop_typing(msg.chat_id)
+
+    async def _get_or_create_dm_channel(self, user_id: str, headers: dict) -> str | None:
+        """Create a DM channel with a user and return the channel ID."""
+        if not self._http:
+            return None
+        try:
+            url = f"{DISCORD_API_BASE}/users/@me/channels"
+            response = await self._http.post(url, headers=headers, json={"recipient_id": user_id})
+            response.raise_for_status()
+            data = response.json()
+            return data.get("id")
+        except Exception as e:
+            logger.warning(f"Failed to create DM channel for user {user_id}: {e}")
+            return None
 
     async def _gateway_loop(self) -> None:
         """Main gateway loop: identify, heartbeat, dispatch events."""
